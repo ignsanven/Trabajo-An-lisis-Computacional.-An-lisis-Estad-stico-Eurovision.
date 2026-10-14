@@ -1,0 +1,1188 @@
+---
+title: "¿Por qué España pierde siempre Eurovisión? ❤️💛❤️ 🤔🎤. Un estudio con los paquetes `igraph`, `ggraph` y  `gganimate`."
+author: 
+  - "Paula Fernández Romera"
+  - "Alba Gómez Román"
+  - "Juan Diego Jurado Carrasco"
+  - "Pino Puerto Pérez"
+  - "Miguel Ángel Sánchez Merino"
+  - "Ignacio Manuel Santos Vendoiro"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cerulean
+vignette: >
+  %\VignetteIndexEntry{[Eurovision]}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+bibliography: bibliografia.bib
+nocite: '@*'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+#Instalamos y cargamos los siguientes paquetes:
+
+library(tidytuesdayR)
+library(readr)
+library(igraph)
+library(ggraph)  
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+library(gganimate)   
+library(tidyr)
+library(gifski)
+
+```
+
+
+# 1. Preparación de datos
+
+Existe un [repositorio en github](https://github.com/rfordatascience/tidytuesday/tree/main/data/2022/2022-05-17)
+del proyecto [TidyTuesday](https://en.wikipedia.org/wiki/TidyTuesday), comunidad que
+fomenta la práctica de manejo de datos, que nos ofrece un dataset limpio con mucha
+informacion de Eurovisión. 
+
+Leemos los dos datasets que nos ofrece el repositorio.
+
+```{r}
+eurovision <- read.csv("eurovision.csv")
+head(eurovision)
+str(eurovision)
+```
+
+Eliminamos las variables que consideramos innecesarias (en principio) para un análisis de datos.
+En nuestro caso optamos por las siguientes: event, event_url, artist_url, image_url, country_emoji, rank_ordinal
+
+```{r}
+eurovision_limpio <- subset(eurovision, select = -c(event, event_url, artist_url, image_url, country_emoji, rank_ordinal))
+
+# Comprobamos los nombres de las columnas que han quedado
+names(eurovision_limpio)
+```
+
+
+```{r}
+eurovision_votes <- read.csv("eurovision-votes.csv")
+head(eurovision_votes)
+str(eurovision_votes)
+```
+
+Eliminamos ahora las de eurovision-votes.
+
+```{r}
+votos_limpios <- subset(eurovision_votes, select = -c(edition, duplicate))
+
+# Vemos el resultado
+str(votos_limpios)
+```
+
+Por otro lado, solo analizaremos los votos recibidos en la final, luego filtramos de nuevo los datos. Además, para la primera parte, restringuimos los datos a posteriores al 2010 para que refleje el mapa geopolítico actual y los puntos a 12 para mejorar la calidad de los resultados.
+
+```{r}
+
+#Primera parte
+
+eurovision_finales_gf <- subset(eurovision_limpio, section == "grand-final")
+votos_finales_12 <- subset(votos_limpios, 
+                        semi_final == "f"& points == 12 & year >= 2010
+)
+
+#Segunda parte
+
+eurovision_finales <- subset(eurovision_limpio, section == "grand-final" | section == "final")
+votos_finales <- subset(votos_limpios, semi_final == "f")
+
+```
+
+
+# 2.Estudio de la Geopolítica de Eurovisión con `igraph` y `ggraph`
+## 2.1. Planteamiento del problema
+
+Nos planteamos la cuestión de quién vota a quién en Eurovisión.
+¿Realmente se vota al país con mejor canción? O por el contrario, Eurovisión es 
+más un reflejo geopolítico y se vota por cercanía y/o intereses políticos además 
+de geográficos.
+
+Para resolver este problema, utilizaremos modelos de Análisis de Redes mediante los
+paquetes igraph y ggraph, que nos permitirán modelar las votaciones como una red 
+de conexiones y descubrir si existen "pandillas" de países.
+
+En el análisis de datos tradicional, solemos estudiar observaciones aisladas (por
+ejemplo, los puntos totales que obtiene una canción). Sin embargo, el Festival de
+Eurovisión encierra una complejidad mucho mayor: su verdadera esencia no radica
+únicamente en quién gana, sino en **quién vota a quién**. 
+
+Cada año, el intercambio de puntuaciones (especialmente los codiciados 12 puntos) 
+teje una compleja telaraña de alianzas geopolíticas, afinidades culturales y vecindad.
+Desde el punto de vista matemático, esta estructura no es una simple tabla de datos,
+sino una **red** o **grafo**, donde los países actúan como "nodos" y los votos
+transferidos actúan como "aristas" o conexiones dirigidas.
+
+El ecosistema de R cuenta con herramientas matemáticas excepcionales para calcular
+las propiedades de estas redes, siendo el paquete `igraph` el estándar de la industria.
+A través de él, analizaremos la topología de las votaciones para desvelar la 
+estructura oculta del festival antes de proceder a su posterior representación.
+
+## 2.2. Paquete igraph
+### 2.2.1 De tabla a grafo: `graph_from_data_frame`
+
+El primer obstáculo al que nos enfrentamos en el análisis de redes es que los
+ordenadores no entienden una tabla como un mapa de relaciones. Para que R comprenda
+la topología de los votos, necesitamos transformar nuestro data frame en un grafo.
+
+Aquí es donde entra en juego el paquete `igraph` con su función principal:
+`graph_from_data_frame()`.
+Esta función actúa como un puente entre el data frame y el grafo.
+En nuestro análisis, hemos optado por su método de uso implícito: al pasarle 
+nuestro dataset (votos_fuertes), el algoritmo lee automáticamente las dos primeras
+columnas y asume que representan los nodos (países), mientras que cada fila se 
+convierte en una arista dirigida (un voto que va de un país a otro).
+
+Al establecer el argumento directed = TRUE, le indicamos al algoritmo que la relación 
+no es recíproca por defecto (que España vote a Portugal no significa que Portugal 
+vote a España).
+
+#### Aplicación
+En nuestro análisis, hemos utilizado esta función para convertir las votaciones
+de Eurovisión en un grafo dirigido. Aseguramos mediante `select` que las columnas
+`from_country` y `to_country` ocupen las dos primeras posiciones del data frame,
+permitiendo que `igraph` identifique correctamente a cada país como un nodo y cada
+voto de 12 puntos como una arista con peso.
+```{r}
+votos_para_grafo <- subset(votos_finales_12, select = c(from_country, to_country, points))
+# Creamos el grafo dirigido
+g <- graph_from_data_frame(votos_para_grafo, directed = TRUE) 
+
+```
+A continuación realizamos un ejemplo práctico ficticio con una pequeña muestra de 
+4 paises:
+
+```{r}
+# Creamos una pequeña tabla simulando algunos votos
+mini_votos <- data.frame(
+  origen = c("España", "Portugal", "Francia", "Italia"),
+  destino = c("Portugal", "España", "España", "Francia"),
+  puntos = c(12, 12, 12, 12)
+)
+
+# Convertimos la tabla en un grafo dirigido
+mini_grafo <- graph_from_data_frame(mini_votos, directed = TRUE)
+
+# Visualizamos el resultado
+plot(mini_grafo, 
+     vertex.color = "lightblue", 
+     vertex.size = 40, 
+     edge.arrow.size = 0.8,
+     main = "De Tabla a Red: Intercambio de 12 puntos")
+```
+
+En este gráfico observamos que España y Portugal se dan los 12 puntos entre ellos,
+Francia se los da a España e Italia a Francia. 
+
+Si utilizásemos el otro método de uso, el explícito, entonces debemos proporcionar 
+a la función una segunda tabla adicional que actúa como un "diccionario" de nuestros
+países.
+Al usar este método, la regla principal es que la primera columna de esa tabla debe
+contener el nombre exacto del país (para que el grafo sepa cómo etiquetar cada nodo). 
+El resto de las columnas simplemente se guardarán como información extra o
+características adicionales de ese país (por ejemplo, su región o bloque cultural).
+Además, este método exige que absolutamente todos los países que aparecen intercambiando votos en nuestra red estén también registrados en ese diccionario.
+
+Realizamos un ejemplo teórico:
+```{r, eval = FALSE}
+# 1. Creamos un diccionario de países:
+# La primera columna debe ser obligatoriamente el nombre del país para que 
+# coincida con los votos.
+diccionario_paises <- data.frame(
+  pais = c("Spain", "Sweden", "Serbia", "France"),
+  bloque_cultural = c("Mediterráneo", "Nórdico", "Balcanes", "Big Five")
+)
+
+# 2. La construcción del grafo usaría el argumento 'vertices':
+g_completo <- graph_from_data_frame(
+  d = votos_para_grafo,          # Nuestras aristas (quién vota a quién)
+  directed = TRUE, 
+  vertices = diccionario_paises # Nuestros nodos (información extra de cada país)
+)
+```
+
+### 2.2.2: `degree`
+Esta función es el número de aristas adyacentes (conexiones entre paises). 
+Como nuestra red de votaciones de Eurovisión es un grafo dirigido (que España vote 
+a Francia no significa que Francia vote a  España), el argumento mode tiene una
+importancia vital, ya que nos permite diferenciar el tipo de conexión que queremos
+analizar:
+
+- mode = "out" (Grado de salida): Contaría cuántas flechas salen de un país (cuántos              votos emite).
+
+- mode = "total": Sumaría todas las conexiones sin importar la dirección.
+
+- mode = "in" (Grado de entrada): Cuenta exclusivamente cuántas flechas apuntan hacia un           país.
+
+
+En nuestro análisis, hemos aplicado la función estableciendo mode = "in". De esta
+forma, le pedimos al algoritmo que calcule el Prestigio o Popularidad de cada nodo, 
+es decir, cuántos países distintos le han otorgado sus  12 puntos a un participante 
+a lo largo de los años.
+
+```{r}
+# Calculamos el "Prestigio" (Cuántos votos fuertes recibe cada país)
+V(g)$votos_recibidos <- degree(g, mode = "in")
+```
+
+### 2.2.3: `betweenness`
+Además del estudio de los países que más puntos reciben, otro factor que no podemos pasar por alto son los países con alta intermediación. Estos nodos son vitales para nuestro análisis, ya que actúan como puente: reciben y otorgan votos a bloques que normalmente no interactúan entre sí.
+
+Por tanto, utilizamos la función betweenness para identificar qué países se encuentran con mayor frecuencia en medio de los caminos más cortos entre todos los participantes posibles. Es decir, buscamos qué países actúan como verdaderos nexos de unión entre
+las distintas alianzas geopolíticos de Eurovisión.
+```{r}
+V(g)$intermediacion <- betweenness(g, directed = TRUE)
+```
+Esta función necesita como argumento principal nuestro gráfico dirigido (g). Además, utilizamos el parámetro directed = TRUE para que el algoritmo tenga en cuenta la dirección estricta de las flechas al buscar los caminos; al fin y al cabo, el flujo de votos en el festival no siempre es recíproco.
+
+### 2.2.4: `as_undirected`
+Los algoritmos de detección de comunidades funcionan de manera mucho más eficiente 
+sobre redes no dirigidas. En nuestro grafo original, los votos tenían dirección.
+Sin embargo, para descubrir alianzas o grupos, la dirección exacta no importa tanto
+como la existencia del vínculo en sí.
+Por ello utilizamos esta función que convierte un grafo dirigido en uno no dirigido.
+
+Dentro de esta función, el argumento clave es mode. Puede valer "collapse" o 
+"mutual".  En nuestro caso hemos usado mode= "collapse".
+Este algoritmo garantiza que no se creen múltiples aristas duplicadas. 
+En el contexto de Eurovisión, esto significa que si dos países se votan mutuamente 
+(hay una flecha de ida y otra de vuelta), la función "colapsa" o fusiona ambas
+flechas en un único vínculo bidireccional, así no se duplica la información.
+
+Si hubiéramos utilizado mode = "mutual", el algoritmo habría exigido reciprocidad
+absoluta. Es decir, solo mantendría la conexión si España le da 12 puntos a Francia
+y Francia le devuelve los 12 puntos a España. 
+Si el voto es unidireccional, el vínculo se borra del mapa. 
+Por lo que descartamos esta opción ya que en Eurovisión un voto unidireccional de
+12 puntos sigue siendo una pista geopolítica fuerte.
+
+```{r}
+#Colapsamos las flechas en vínculos bidireccionales
+g_sym <- as_undirected(g, mode = "collapse")
+
+```
+
+### 2.2.5: `cluster_walktrap`
+Con nuestra red ya creada, procedemos a aplicar el algoritmo de agrupamiento.
+Para ello utilizamos `cluster_walktrap`, cuyo objetivo es encontrar subgrafos 
+densamente conectados (lo que llamamos "comunidades" o grupos) a través de la
+simulación de caminatas aleatorias (random walks).
+Esto en nuestro ejemplo de Eurovisión se utiliza porque si comenzamos en un país 
+al azar y "caminamos" hacia otro país siguiendo las conexiones de los votos, es
+altamente probable que nos quedemos "atrapados" dando vueltas dentro de un mismo
+bloque cultural (por ejemplo, entre los países nórdicos o los balcánicos),
+ya que las conexiones hacia fuera del grupo son mucho más escasas.
+
+```{r}
+comunidades <- cluster_walktrap(g_sym) 
+```
+Este algoritmo ignora las direcciones de las aristas en grafos dirigidos, por ello
+antes hemos tenido que usar `as_undirected`.
+Además, hemos mantenido el valor por defecto del algoritmo, que simula caminatas
+cortas de 4 saltos. Para una red del tamaño de Eurovisión (alrededor de 40 nodos),
+una longitud de 4 pasos es la medida óptima para detectar alianzas regionales, 
+ya que un número excesivo de saltos provocaría que el 'caminante' trascendiera 
+los bloques locales, difuminando así las fronteras estructurales de los clanes."
+
+### 2.2.6: `membership`
+Tras haber transformado la red en no dirigida y aplicado el algoritmo `cluster_walktrap()` necesitamos una función para extraer a qué grupo pertenece 
+cada país.
+
+El uso de la función `membership` nos permite trabajar con las comunidades 
+detectadas con las anteriores funciones.
+
+Esta función combinada con as.factor asigna a cada bloque una categoría
+discreta e impide que el programa tome estos números como valores numéricos.
+(es decir, el Grupo 2 no vale más que el Grupo 1, simplemente son distintos).
+```{r}
+V(g)$bloque <- as.factor(membership(comunidades))
+```
+
+Gracias a que ahora cada país tiene su etiqueta en V(g)$bloque, podemos pedirle a 
+R que dibuje la red ignorando las fronteras políticas y usando únicamente la 
+afinidad de votos hallada.
+
+#### Aplicación 
+
+Vamos a usar la función plot básica integrada en igraph para ver si el algoritmo
+ha detectado correctamente los grupos antes de pasar a la visualización avanzada.
+```{r}
+plot(comunidades, g_sym,
+     vertex.size = 5,             # Hacemos los nodos pequeñitos
+     vertex.label.cex = 0.6,      # Hacemos el texto de los países más pequeño
+     vertex.label.color = "black",
+     edge.arrow.size = 0,         # Quitamos las flechas para que se vea limpio
+     main = "Gráfico Exploratorio: Detección de Clanes (Walktrap)")
+```
+
+Como podemos observar en este gráfico de diagnóstico, la función plot() de igraph
+rodea a cada comunidad detectada con un halo de color.
+Aunque visualmente es algo caótico debido a la densidad de la red, nos confirma
+matemáticamente que los países se han agrupado correctamente.
+
+Además, vemos que gracias a que ahora cada país tiene su propia etiqueta usada
+con el atributo V(g)$bloque, podemos pedirle a R que construya una representación
+visual mucho más limpia, profesional y avanzada utilizando la gramática de ggraph.
+
+
+## 2.3. Paquete ggraph
+
+El paquete `ggraph` es una extensión directa del famoso paquete `ggplot2`. Este nos permite construir visualizaciones de redes sumando capas, ofreciendo un control absoluto sobre la estética y la disposición espacial de los datos. 
+Ahora utilizaremos `ggraph` para interpretar la matriz de votos de Eurovisión, demostrando cómo podemos aplicar diferentes algoritmos de distribución (*layouts*), geometrías de nodos (`geom_node_*`) y trazados de aristas (`geom_edge_*`) para convertir una tabla de votaciones, que en un principio puede parecer un caos, en mapas visuales claros y elegantes.
+
+
+### 2.3.1. Grafo de atracción: `ggraph(layout = "fr")`
+
+Todo el mundo habla de que los países vecinos se votan entre sí en Eurovisión para mantener una buena relación entre ellos. Y es completamente normal, a todos nos gustaría llevarnos bien con aquellos con los que compartimos frontera. El problema que se nos plantea aquí es ver si podemos demostrar visualmente la existencia de clústeres de países que se intercambian las máximas puntuaciones.
+
+Para ello, primero vamos a filtrar nuestra base de datos para quedarnos solo con los votos de 12 puntos. Si observamos la base de datos, esos 12 puntos pueden venir del jurado o del tele-voto. Vamos a tener ambos en cuenta porque tenemos motivos para pensar que tanto el jurado como los teleespectadores tienen el mismo interés geopolítico.
+
+Una de las funciones clave para este problema es `ggraph(layout = "fr")`. Esta usa el algoritmo de Fruchterman-Reingold. El algoritmo Fruchterman-Reingold (layout = "fr") distribuye los nodos simulando un sistema de fuerzas físicas. Por defecto, los países actúan como imanes que se repelen entre sí, pero las conexiones (los votos) funcionan como muelles tensores que los atraen. Al buscar el equilibrio matemático, este algoritmo empuja de forma natural a los países aislados hacia los márgenes del lienzo, mientras que atrae y agrupa en el centro a los bloques geopolíticos que se intercambian las puntuaciones más altas, revelando visualmente las alianzas ocultas del festival.
+
+Por otro lado, tenemos otras tres funciones que nos van a resultar muy útiles para la interpretación de los datos de nuestra base. Tenemos la función `geom_edge_link()`, que se encarga de dibujar líneas rectas entre distintos nodos. Tiene distintos argumentos que nos permite ajustar el formato de las líneas, que en nuestro caso, las hemos transformado en flechas para ver el origen y el destino de los votos con el argumento *arrow*. La función `geom_node_point()` sirve para representar cada país mediante un punto. El tamaño (size) depende de la métrica de centralidad (votos_recibidos) y el color depende del grupo cultural (bloque). Y la función `geom_node_label()` es una variante de texto que, en lugar de poner las letras sueltas sobre el fondo, coloca el nombre del país dentro de una "caja" para una mejor estética visua. El argumento *repel = TRUE* ejecuta un algoritmo interno que desplaza automáticamente las cajas para asegurarse de que ninguna se monte encima de otra ni tape los círculos de los países.
+
+Por último, preparamos el espacio dónde dibujar nuestro grafo con `theme_graph`, la cual borra todo lo que traería un gráfico normal por defecto (los ejes X e Y, los números de los márgenes y la cuadrícula de fondo), dejando un lienzo en blanco para que solo destaquen las conexiones.
+
+
+```{r}
+
+# Usamos set.seed para que la distribución de los puntos sea siempre la misma
+set.seed(123)
+p1 <- ggraph(g, layout = "fr") +
+  
+  # Dibujamos las flechas
+  geom_edge_link(aes(edge_alpha = points), 
+                 arrow = arrow(length = unit(2, 'mm')), 
+                 end_cap = circle(8, 'mm'), 
+                 color = "black") +
+  
+  # Dibujamos los nodos de cada país
+  geom_node_point(aes(size = votos_recibidos, color = bloque)) +
+  scale_size(range = c(5, 15)) + 
+  
+  # Ponemos los nombres de cada país
+  geom_node_label(aes(label = name),  
+                  repel = TRUE,             # Hace que los carteles no se monten unos encima de otros
+                  size = 3.5,               # Tamaño de la letra
+                  fontface = "bold",        # Letra en negrita
+                  fill = "white",           # Fondo blanco para el cartelito
+                  label.padding = unit(0.2, "lines")) +
+  
+  theme_graph(base_family = "sans") + 
+  theme(legend.position = "none") + 
+labs(title = "El Mapa de las Alianzas de Eurovisión (Desde 2010)",
+       subtitle = "Cada bolita es un país. Los más grandes son los más votados por sus amigos.")
+
+# Mostramos el gráfico
+print(p1)
+
+```
+
+
+Como podíamos esperar, intentar dibujar todas las relaciones entre todos los países en el mismo plano iba a ser muy complejo. Para poder hacer esto más entendible, vamos a hacer uso de las funciones `induced_subgraph()` y `vcount()`, las cuales recuperamos del paquete `igraph`.
+
+La primera nos permite tomar los nodos que necesitamos y, además, incluye todas las conexiones entre ellos. Lo que nos permite definir perfectamente los diferentes grupos para obtener gráficos más legibles y fáciles de interpretar. El argumento principal de la función sigue siendo nuestra red (g) y con el argumento *vids* seleccionamos los nodos que queremos mantener en el gráfico. En este caso, nos quedamos con los vértices del grafo que pertenezcan al bloque que estamos estudiando.
+Es posible que el algoritmo de detección de comunidades encuentre grupos con poca significatividad, es decir, alianzas entre uno o dos países que no van a influir en nuestro estudio. A la hora de realizar nuestros gráficos, generamos solo los que nos van a proporcionar algún tipo de información útil. Por tanto, necesitamos alguna función que compruebe el número de países que pertenece a cada alianza hallada. A través de `vcount()`, obtenemos el número de nodos de la nueva red. El único argumento necesario será el subgrupo estudiado en cada iteración del bucle.
+
+
+```{r}
+
+# Averiguamos cuántos grupos distintos ha detectado el algoritmo
+lista_grupos <- unique(V(g)$bloque)
+
+# Si salen gráficos separados (por haber 3 o más países) definimos una paleta
+# de colores para que los gráficos resultantes no tengan los mismos colores
+
+library(scales) #paquete dentro de ggplot2 que nos va a permitir hacerlo
+
+# Creamos una paleta con tantos colores distintos como grupos haya
+# hue_pal() genera los colores clásicos de ggplot automáticamente
+colores_grupos <- hue_pal()(length(lista_grupos)) 
+names(colores_grupos) <- lista_grupos 
+
+# 
+for (grupos in lista_grupos) {
+  
+  # Guardamos el color qde cada grupo
+  color_actual <- colores_grupos[as.character(grupos)]
+  
+  # Filtramos el cerebro de igraph para quedarnos SOLO con los países de ese grupo
+  sub_red <- induced_subgraph(g, vids = V(g)[V(g)$bloque == grupos])
+  
+  # Solo le pedimos que lo dibuje si el grupo tiene 3 o más países
+  if (vcount(sub_red) >= 3) {
+    
+    set.seed(123)
+    p_grupo <- ggraph(sub_red, layout = "fr") +
+      
+      geom_edge_link(aes(edge_alpha = points), 
+                     arrow = arrow(length = unit(3, 'mm')), 
+                     end_cap = circle(8, 'mm'), 
+                     color = "gray70") +
+      
+      geom_node_point(aes(size = votos_recibidos), color = color_actual) +
+      scale_size(range = c(3, 10)) +
+      
+      geom_node_label(aes(label = name), 
+                      repel = TRUE,             
+                      size = 3,       
+                      fontface = "bold",        
+                      fill = "white",           
+                      label.padding = unit(0.2, "lines")) +
+      
+      theme_graph(base_family = "sans") + 
+      theme(legend.position = "none") + 
+      
+      labs(title = paste("Análisis del Grupo Geopolítico Número", grupos),
+           subtitle = "Mapa aislado de las alianzas")
+    
+    # Imprimimos el gráfico 
+    print(p_grupo)
+  }
+}
+
+```
+
+
+
+### 2.3.2. Flujo Circular Interno: `ggraph(layout = "linear", circular = TRUE)`
+
+¿Y si intentasemos dibujar todos los votos de 12 puntos de una final en un mapa normal, sin tener en cuenta como se tengan que disponer los nodos en el espacio? Es decir, querríamos visualizar simplemente el intercambio de votos de todos los países. Lo más intuitivo sería formar un círculo con los nodos. El problema principal de esto es que el gráfico sería una mancha de tinta incomprensible por el cruce masivo de líneas.
+Bueno, esto tiene fácil solución. Simplemente tendríamos que volver a usar la división por grupos que ya teníamos gracias a las funciones del paquete `igraph`.
+
+Ahora, para dibujar nuestro grafo, usamos la función `ggraph()`, pero esta vez, ponemos el argumento *layout = "linear"* para que nos situe cada país uno detrás de otro, sin tener en cuenta los grupos; el el argumento *circular = TRUE* para disponerlos en una circunferencia. Y para representar el intercambio de votos, usamos `geom_edge_arc()`, que dibuja los votos curvando las líneas hacia el centro del círculo. Al igual que para `geom_edge_link()`, tiene distintos argumentos que nos permite ajustar el formato de las líneas, que en nuestro caso, las hemos transformado en flechas para ver el origen y el destino de los votos con el argumento *arrow*.
+
+
+```{r}
+
+for (grupos in lista_grupos) {
+  
+  sub_red <- induced_subgraph(g, vids = V(g)[V(g)$bloque == grupos])
+  
+  color_actual <- colores_grupos[as.character(grupos)]
+  
+  if (vcount(sub_red) >= 3) {
+    
+    set.seed(123)
+    
+    p2_grupos <- ggraph(sub_red, layout = "linear", circular = TRUE) +
+      
+      # Flechas
+      geom_edge_arc(aes(color = as.factor(points)), 
+                    arrow = arrow(length = unit(3, 'mm')),
+                    end_cap = circle(8, 'mm'),
+                    alpha = 0.6) +
+      
+      # Nodos
+      geom_node_point(aes(size = votos_recibidos), color = color_actual) +
+      scale_size(range = c(3, 10)) +
+      
+      # Etiquetas
+      geom_node_label(aes(label = name), 
+                      repel = TRUE,             
+                      size = 3,       
+                      fontface = "bold",        
+                      fill = "white",           
+                      label.padding = unit(0.2, "lines")) +
+      
+      theme_graph(base_family = "sans") +
+      theme(legend.position = "right") +
+      
+      labs(title = paste("Flujo Circular Interno - Grupo Geopolítico", grupos),
+           subtitle = "¿Cómo se reparten los puntos dentro de este bloque?",
+           edge_color = "Puntos Otorgados",
+           size = "Votos Recibidos")
+    
+    print(p2_grupos)
+  }
+}
+```
+
+Después de ver estos gráficos, la respuesta a por qué España pierde siempre Eurovisión, queda aún más clara. Vemos que, a pesar de contar con votos de múltiples países distintos en su grupo geopolítico, los países predominantes de este grupo son Rusia, Ucrania y Grecia, entre otros. Además, entre los otros grupos también se encuentra mucha carga de votos que España no recibe. 
+
+
+# 3. Evolución Histórica de Eurovisión mediante ```gganimmate```
+
+## 3.1. Introducción al problema
+
+En esta sección trataremos de analizar la evolución del voto Eurovisión mediante la ayuda del paquete `gganimate`. El Festival de Eurovisión tiene un registro de votaciones desde 1956, con decenas de países participando cada año y han ido implementando nuevos sistemas de voto como el *televoto* y al aumentar el número de países desde los años 60, la cantidad de puntos ha aumentado considerablemente.
+
+Es por ello que el principal problema para representar estos datos en gráficos convencionales es el paso del tiempo, y es ahí donde las funciones de `gganimate` nos sirven como herramientas principales para visualizar con claridad cómo evolucionan los puntajes año tras año.
+
+
+## 3.2 Funciones necesarias
+
+Para explicar cada función que necesitaremos más adelante para crear los gráficos, e incluso algunas funciones relacionadas que no usaremos, extraeremos una pequeña parte de nuestra base de datos que nos sirva para ejemplificar el uso de cada una de ellas mediante gráficos similares a los gráficos finales.
+Filtraremos únicamente los resultados de España, Francia e Italia entre los años 2015 y 2019:
+
+```{r datos_ejemplo, warning=FALSE, message=FALSE}
+# Filtramos un subconjunto de los datos limpios de la sección anterior
+# y preparamos una versión a pequeña escala de nuestra estructura de datos final
+datos_ejemplo <- eurovision_finales %>%
+  filter(artist_country %in% c("Spain", "France", "Italy"),
+         year >= 2015, year <= 2019) %>%
+  
+  # Calculamos el acumulado y el ranking para poder hacer mini-carreras
+  group_by(artist_country) %>%
+  arrange(year) %>%
+  mutate(puntos_acumulados = cumsum(total_points)) %>%
+  ungroup() %>%
+  group_by(year) %>%
+  mutate(ranking = rank(-puntos_acumulados, ties.method = "first")) %>%
+  ungroup()
+```
+
+
+### 3.2.1. Familia `transition`
+El eslabón fundamental de cualquier animación en ```gganimate``` es la familia de funciones ```transition```. Estas funciones le indican al gráfico base la variable que debe usar para dividir los datos en fotogramas y cómo debe comportarse al pasar de uno a otro.
+
+
+#### `transition_reveal`
+La función ```transition_reveal()``` permite que una línea se vaya dibujando progresivamente a lo largo de un eje, manteniendo visible el recorrido anterior. Hace que el punto de cada país avance de izquierda a derecha revelando la línea histórica de sus puntos, sin que los años anteriores desaparezcan de la pantalla.
+Lo aplicaremos más adelante, en nuestro Gráfico 2.
+
+```{r transition_reveal, warning=FALSE, message=FALSE}
+# 1. Gráfico estático base (Líneas de evolución)
+grafico_lineas_ejemplo <- ggplot(datos_ejemplo, aes(x = year, y = puntos_acumulados, color = artist_country)) +
+  geom_line(linewidth = 1.5) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "Evolución Puntaje Acumulado (España, Francia e Italia)",
+       x = "Año",
+       y = "Puntos Acumulados")
+
+# 2. Animamos revelando la línea de izquierda a derecha
+anim_revelar <- grafico_lineas_ejemplo + 
+  transition_reveal(year)
+
+animate(anim_revelar)
+```
+
+
+
+#### `transition_states`
+Esta función es ideal cuando nuestra variable temporal representa etapas cerradas (como las ediciones individuales del festival) y quieres que los elementos salten de un estado a otro. En nuestro Gráfico 1 ( _Bar Chart Race_ ), cada año es un estado diferente.
+
+```{r transition_states, warning=FALSE, message=FALSE}
+# 1. Gráfico estático base
+grafico_barras_ejemplo <- ggplot(datos_ejemplo, aes(x = ranking, y = puntos_acumulados, 
+                                                    fill = artist_country, group = artist_country)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(y = puntos_acumulados, label = artist_country), hjust = -0.2) +
+  coord_flip(clip = "off") + scale_x_reverse() + # Giramos e invertimos para formato "carrera"
+  theme_minimal() +
+  labs(title = "Año: {closest_state}",
+       x = "Ranking",
+       y = "Puntaje acumulado")
+
+# 2. Animamos por estados (años) para que compitan entre sí
+anim_estados <- grafico_barras_ejemplo + 
+  transition_states(year)
+
+animate(anim_estados)
+```
+
+En nuestro código completo, le añadimos los parámetros transition_length = 4 y state_length = 2 para afinar cuánto tiempo visual dura la transición entre un año y otro, y cuánto tiempo se queda la barra estática para que el espectador pueda verla bien.
+
+
+#### `transition_time`
+A diferencia de los estados discretos, ```transition_time()``` asume que la variable temporal es continua. Los elementos fluyen por la pantalla reflejando el tiempo real que pasa entre los datos. Lo usaremos en nuestro Gráfico 3 para ver cómo los puntos de los países se mueven según su orden de actuación y puntuación.
+
+```{r transition_time, warning=FALSE, message=FALSE}
+# 1. Gráfico estático base (Dispersión: Orden de actuación vs Puntos)
+grafico_puntos_ejemplo <- ggplot(datos_ejemplo, aes(x = running_order, y = total_points, color = artist_country)) +
+  geom_point(size = 5) +
+  theme_minimal() +
+  labs(title = "Año: {round(frame_time)}",
+       x = "Orden de Actuación",
+       y = "Puntaje Total")
+
+# 2. Animamos por tiempo continuo
+anim_tiempo <- grafico_puntos_ejemplo + 
+  transition_time(year)
+
+animate(anim_tiempo)
+```
+
+### 3.2.2. Familia `shadow`
+Según si queremos que el avance de los años haga que los puntos vayan dejando rastro tras de sí para ver la evolución con claridad, la familia ```shadow``` nos ofrece diversas opciones para personalizar ese trazo que dejan los datos allí por donde pasan.
+
+
+#### `shadow_mark`
+Si queremos mostrar la historia completa y retener en la pantalla qué ocurrió en ediciones anteriores, ```shadow_mark()``` dibuja y mantiene los datos pasados en el lienzo. Lo usaremos en nuestro gráfico de dispersión final para crear una nube de puntos. Esta será la única función que usaremos de esta familia.
+
+```{r shadow_mark, warning=FALSE, message=FALSE}
+# Movimiento dejando las marcas pasadas en gris claro
+anim_tiempo + shadow_mark(color = "grey", alpha = 0.5)
+```
+
+
+#### `shadow_null`
+Es el comportamiento por defecto de ```gganimate```. Cada punto se mueve a su nueva posición sin dejar ningún rastro de dónde estuvo en la edición anterior.
+
+```{r shadow_null, warning=FALSE, message=FALSE}
+# Movimiento sin rastro
+anim_tiempo + shadow_null()
+```
+
+#### `shadow_trail`
+Aunque no lo usemos en nuestro gráfico final, ```shadow_trail()``` ofrece la posibilidad de ir dejando un rastro intermitente, como si el punto fuera soltando migas de pan a medida que se mueve y no sólo cuando llega a su destino.
+
+```{r shadow_trail, warning=FALSE, message=FALSE}
+# Movimiento dejando un rastro espaciado
+anim_tiempo + shadow_trail(distance = 0.1, alpha = 0.5)
+```
+
+## 3.3. Aplicaciones a nuestro problema
+
+### 3.3.1. Gráfico 1
+
+En este primer gráfico nuestro objetivo será constatar qué países forman el _Top 10_ de todas las ediciones de Eurovisión. Para ello, construiremos un gráfico _Bar Chart Race_, es decir, el típico gráfico en el que las barras horizontales van creciendo y decreciendo y así subiendo y bajando puestos. Calcularemos la suma acumulada de puntos de cada país a lo largo de las ediciones, para ver así quién se mantiene más tiempo en el podio.
+
+```{r grafico1, warning=FALSE, message=FALSE}
+# Partimos del dataset filtrado por Nacho (eurovision_finales)
+datos_animacion <- eurovision_finales %>%
+  # Calculamos los puntos totales por país en cada edición
+  group_by(year, artist_country) %>%
+  summarise(puntos_edicion = sum(total_points, na.rm = TRUE), .groups = 'drop') %>%
+  
+  # Ordenamos cronológicamente antes de sumar históricamente
+  arrange(year) %>%
+  
+  # Agrupamos por país y calculamos la suma acumulada histórica
+  group_by(artist_country) %>%
+  mutate(puntos_acumulados = cumsum(puntos_edicion)) %>%
+  ungroup() %>%
+  
+  # Agrupamos por año para calcular el RANKING dinámico
+  group_by(year) %>%
+  mutate(ranking = rank(-puntos_acumulados, ties.method = "first")) %>%
+  ungroup() %>%
+  
+  # Filtramos solo el Top 10 histórico de cada año
+  filter(ranking <= 10)
+
+#---------------------------------------------------------------------------------------------------------
+#GRAFICO BASE
+grafico_base <- ggplot(datos_animacion, aes(x = ranking, y = puntos_acumulados, 
+                                            fill = artist_country, group = artist_country)) +
+  geom_col(width = 0.8, alpha = 0.9, color = "black") +
+  geom_text(aes(y = puntos_acumulados, label = paste(artist_country, " (", puntos_acumulados, ") ")), 
+            hjust = -0.1, size = 5) +
+  coord_flip(clip = "off", expand = FALSE) +
+  scale_x_reverse() +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_blank(),
+    axis.title.y = element_blank(),
+    plot.margin = margin(1, 5, 1, 1, "cm")
+  ) +
+  labs(
+    title = "Los Favoritos Históricos de Eurovisión",
+    subtitle = "Año de la edición: {closest_state}",
+    y = "Puntos Acumulados Totales"
+  )
+
+#ANIMACION CON TRANSITION_STATES
+
+animacion <- grafico_base +
+  transition_states(year, transition_length = 4, state_length = 2) +
+  ease_aes('cubic-in-out')
+
+animate(animacion, fps = 25, duration = 15, rewind = FALSE)
+```
+
+
+### 3.3.2. Gráfico 2
+
+En este gráfico, la meta será comparar la evolución histórica de puntos exclusivamente del "Big 5", es decir los países que más aportan económicamente: España, Francia, Italia, Alemania y Reino Unido. De esta manera podemos discernir cuál es el mejor entre ellos.
+
+```{r grafico2, warning=FALSE, message=FALSE}
+# --- GRÁFICO 2: LÍNEAS CON TRANSITION_REVEAL ---
+
+# 1. Filtramos los datos para coger solo a los 5 países deseados
+datos_big5 <- datos_animacion %>%
+  filter(artist_country %in% c("Spain", "France", "Italy", "Germany", "United Kingdom"))
+
+# 2. Creamos el gráfico de líneas estático
+grafico_lineas <- ggplot(datos_big5, aes(x = year, y = puntos_acumulados, color = artist_country)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) + # Añadimos un punto en la punta de la línea
+  geom_text(aes(label = artist_country), hjust = -0.5, vjust = 0.5, show.legend = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    title = "Evolución de los puntos del 'Big 5'",
+    x = "Año",
+    y = "Puntos Acumulados"
+  ) +
+  # Hacemos que el eje X se expanda un poco a la derecha para que quepa el texto
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) 
+
+# 3. La animación con la nueva función
+animacion_lineas <- grafico_lineas +
+  transition_reveal(year)
+
+# Renderizamos
+animate(animacion_lineas, nframes = 200, fps = 20)
+```
+
+### 3.3.3. Gráfico 3
+Con este último gráfico, nuestra idea consiste en contrastar si afecta o no el orden en el que se actúa a los puntos que se reciben. Es decir, comprobar si el hecho de actuar de los primeros o de los últimos afecta en la cuantía de los votos, demostrando así que puede tratarse de una variable tan importante como la calidad de la canción en sí.
+
+```{r grafico3, warning=FALSE, message=FALSE}
+# --- GRÁFICO 3: DISPERSIÓN CON TRANSITION_TIME Y SHADOW_MARK ---
+
+# Usamos el dataset limpio de Nacho de las finales directamente
+grafico_puntos <- ggplot(eurovision_finales, aes(x = running_order, y = total_points)) +
+  geom_point(aes(color = artist_country), size = 4, alpha = 0.8) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    # Atención a la variable {frame_time}, es distinta a la de states
+    title = "Actuación vs Puntuación en el año {round(frame_time)}",
+    x = "Orden de actuación (Running Order)",
+    y = "Puntos totales obtenidos en la edición"
+  )
+
+# La animación con las nuevas funciones
+animacion_puntos <- grafico_puntos +
+  transition_time(year) +
+  # shadow_mark deja un "rastro" o sombra de los puntos de años anteriores
+  shadow_mark(alpha = 0.6, size = 1.5, color = "grey") +
+  ease_aes('linear')
+
+# Renderizamos
+animate(animacion_puntos, nframes = 200, fps = 20)
+```
+
+## 3.4 Como mejorar nuestras gráficas
+
+Hasta ahora hemos estado explicando las funciones básicas del paquete para hacer animaciones. Propongamonos ahora subir un poco el nivel y hacer que estas gráficas se vean más chulas pero, sobre todo, más faciles de interpretar. Para ello acompañaremos nuestras explicaciones con un análisis más específico sobre la relación de España  con los demás países en Eurovisión.
+
+Comenzamos filtrando los votos como nos convenga. 
+
+```{r}
+
+# Filtramos solo los votos que ha recibido España
+votos_espana <- subset(votos_finales, to_country == "Spain")
+
+# Sumamos todos los puntos agrupando por el país que vota (from_country)
+totales_por_pais <- aggregate(points ~ from_country, data = votos_espana, FUN = sum)
+
+# Ordenamos el dataframe de mayor a menor según los puntos
+totales_ordenados <- totales_por_pais[order(-totales_por_pais$points), ]
+
+# Extraemos solo los nombres de los 5 primeros países
+top_amigos <- head(totales_ordenados$from_country, 10)
+
+# Filtramos los datos para quedarnos solo con los votos de esos 5 amigos a España
+datos_top_amigos <- subset(votos_espana, from_country %in% top_amigos)
+
+# Agrupamos por año y por país (sumando los puntos de cada año)
+datos_agrupados <- aggregate(points ~ year + from_country, data = datos_top_amigos, FUN = sum)
+
+# Ordenamos cronológicamente: primero por país y luego por año (vital para acumular bien)
+datos_ordenados <- datos_agrupados[order(datos_agrupados$from_country, datos_agrupados$year), ]
+
+# Calculamos la suma acumulada por grupo usando la función ave()
+datos_ordenados$puntos_acumulados <- ave(datos_ordenados$points, datos_ordenados$from_country, FUN = cumsum)
+```
+
+### Familia ```view```
+
+Esta familia de funciones nos permite en cierta manera controlar la perspectiva con la que queremos ver como avanza el gráfico. Por defecto, y como ahora que lo sabemos podemos observar en las animaciones previas, mantiene fija la gráfica con los ejes asignados, lo que sería equivalente a usar la función ```view_static()```.
+
+#### ```view_follow()```
+
+Esta función es sin duda la más usada por su gran utilidad y efectismo. Nos permiteque los ejes se expandan o contraigan en tiempo real. 
+Para verla en acción, grafiquemos los diez países que han dado más votos a España.
+
+En primer lugar realizamos el grafico con el paquete *ggplot2*
+```{r}
+grafico_espana <- ggplot(datos_ordenados, aes(x = year, y = puntos_acumulados, color = from_country)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_text(aes(label = from_country), hjust = -0.3, size = 3, fontface = "bold") + 
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") + 
+  coord_cartesian(clip = 'off') + 
+  labs(
+    title = "Los 'Mejores Amigos' de España en Eurovisión",
+    subtitle = "Puntos acumulados recibidos en la Final. Año: {frame_along}",
+    x = "Año",
+    y = "Puntos Acumulados"
+  ) +
+  theme(
+    legend.position = "none", 
+    plot.margin = margin(10, 70, 10, 10), 
+    text = element_text(size = 10)
+  )
+```
+
+ Y como hemos acostumbrado ya, añadimos el comando médiante un ```+```.
+ 
+```{r}
+grafico_animado <- grafico_espana + transition_reveal(year) +   view_follow()
+
+grafico_animado
+```
+
+Observamos como los ejes crecen en consonancia con las rectas. Si solo quisieramos el crecimiento acompañase a uno de los ejes podemos fijar uno con los comando lógicos ```fixed_x = TRUE```.
+
+```{r}
+grafico_animado <- grafico_espana + transition_reveal(year) +   view_follow(fixed_x = TRUE)
+
+grafico_animado
+```
+
+#### ```view_step()```
+
+Este función nos permite que la escala en vez de crecer de forma continua, vaya dando saltos cada cierto tiempo. Los parámetros que nos permiten modificar estos saltos son ``` pause_length```, para el tiempo que se queda estático  y ```step_length``` para los tamaños de los saltos que dé.
+Existe otra comando parecido pero diseñado para transiciones concretas llamado ```view_zoom()```, pero no es de tanta utilidad.
+
+### Familia ```ease_aes```
+
+Está función sirve para definir como cambia un valor a otro durante la transición.  Su uso es sencillo invocamos la función junto al parámetro que regirá la transición. las opciones son las siguientes:
+
+- linear: velocidad lineal por defecto.
+- quadratic: potencia de dos.
+- cubic: potencia de tres.
+- bounce: modela el bote de una pelota.
+
+Ademas se pueden modificar para que se aplique en cierto momento de la transición
+
+- in: al principio.
+- out: al final.
+- in-out: a ambos lados. Es el más usado pues arranca lento, acelera en medio y frena al llegar.
+
+Para ver su funcionamiento analizaremos la reciprocidad de las votaciones de España, esto es, si los paises a los que vota España concuerda con los que les votan.
+
+```{r}
+# 1. Separamos los votos emitidos POR España y los recibidos HACIA España
+votos_desde_es <- subset(votos_finales, from_country == "Spain")
+votos_hacia_es <- subset(votos_finales, to_country == "Spain")
+
+# 2. Agrupamos y sumamos los puntos por año y país de destino
+dados_por_es <- aggregate(points ~ year + to_country, data = votos_desde_es, FUN = sum)
+names(dados_por_es)[names(dados_por_es) == "to_country"] <- "pais"
+names(dados_por_es)[names(dados_por_es) == "points"] <- "dados"
+
+# 3. Agrupamos y sumamos los puntos por año y país de origen
+recibidos_por_es <- aggregate(points ~ year + from_country, data = votos_hacia_es, FUN = sum)
+names(recibidos_por_es)[names(recibidos_por_es) == "from_country"] <- "pais"
+names(recibidos_por_es)[names(recibidos_por_es) == "points"] <- "recibidos"
+
+# 4. Fusionamos ambos bloques en una matriz única por año y país
+matriz_intercambio <- merge(dados_por_es, recibidos_por_es, by = c("year", "pais"), all = TRUE)
+matriz_intercambio$dados[is.na(matriz_intercambio$dados)] <- 0
+matriz_intercambio$recibidos[is.na(matriz_intercambio$recibidos)] <- 0
+
+# 5. TRUCO DE R BASE: Creamos un grid completo de años y países para evitar que 
+# los puntos desaparezcan en la animación si un año no se votaron.
+all_years <- unique(matriz_intercambio$year)
+all_paises <- unique(matriz_intercambio$pais)
+grid_completo <- expand.grid(year = all_years, pais = all_paises)
+
+datos_completos <- merge(grid_completo, matriz_intercambio, by = c("year", "pais"), all.x = TRUE)
+datos_completos$dados[is.na(datos_completos$dados)] <- 0
+datos_completos$recibidos[is.na(datos_completos$recibidos)] <- 0
+
+# 6. Ordenamos cronológicamente por país y calculamos los puntos acumulados históricos
+datos_completos <- datos_completos[order(datos_completos$pais, datos_completos$year), ]
+datos_completos$dados_acum <- ave(datos_completos$dados, datos_completos$pais, FUN = cumsum)
+datos_completos$recibidos_acum <- ave(datos_completos$recibidos, datos_completos$pais, FUN = cumsum)
+
+# 7. Filtramos automáticamente los 12 países con mayor volumen de interacción total
+volumen_total <- aggregate(dados + recibidos ~ pais, data = datos_completos, FUN = sum)
+names(volumen_total)[2] <- "total_intercambio"
+top_paises <- head(volumen_total[order(-volumen_total$total_intercambio), "pais"], 12)
+
+datos_grafico <- subset(datos_completos, pais %in% top_paises)
+
+
+# ==============================================================================
+# 2. DISEÑO DEL DIAGRAMA DE DISPERSIÓN (ggplot2)
+# ==============================================================================
+
+grafico_dispersion <- ggplot(datos_grafico, aes(x = dados_acum, y = recibidos_acum, color = pais)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkgray", linewidth = 1) +
+  
+  # Dibujamos los puntos y sus etiquetas de texto
+  geom_point(size = 2, alpha = 0.8) +
+  geom_text(aes(label = pais), vjust = -1.2, size = 2, fontface = "bold") +
+  
+  # Forzamos una escala idéntica en X e Y para que la diagonal esté a 45 grados exactos
+  coord_fixed() +
+  theme_minimal() +
+  labs(
+    title = "El 'Toma y Daca' de Eurovisión: Reciprocidad con España",
+    subtitle = "Histórico de Puntos Acumulados. Año: {round(frame_time)}",
+    x = "Puntos que España ha REGALADO a ese país",
+    y = "Puntos que ese país ha DEVUELTO a España"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 9, face = "bold"),
+    text = element_text(size = 7),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+```
+
+Usamos una velocidad lineal
+
+```{r}
+animacion_dispersion <- grafico_dispersion +
+  transition_time(year) +
+  ease_aes('linear')
+
+animacion_dispersion
+```
+
+Vemos que con la velocidad cúbica se ueven más rápido.
+
+```{r}
+animacion_dispersion <- grafico_dispersion +
+  transition_time(year) +
+  ease_aes('cubic-in-out')
+
+animacion_dispersion
+```
+
+### Funciones ```enter_exit```
+
+La idea de estás funciones es sencilla, hacer el efecto que que quieras que entren y salgan los valores. Dejamos aquí los más visuales:
+- enter_fade() (o exit).
+- enter_grow() (o exit_shrink).
+- enter_ fly() (o exit).
+- enter_ drift() (o exit).
+
+Para visualizar este comando usamos una gráfica que nos enseña los paises que nos dieron más de 10 votos entre 2014 y 2022.
+
+```{r}
+
+datos_vip <- votos_finales %>%
+  filter(to_country == "Spain", year >= 2014) %>%
+  # Sumamos los puntos por si en el mismo año recibe puntos de jurado y televoto
+  group_by(year, from_country) %>%
+  summarise(puntos_totales = sum(points), .groups = "drop") %>%
+  # AQUI ESTÁ LA CLAVE: Solo sobreviven los que nos dan 10 puntos o más. 
+  # Si un país nos da 8, desaparece de la base de datos ese año.
+  filter(puntos_totales >= 10)
+
+# Truco visual: Le asignamos un número de "carril" (coordenada X) fijo a cada país
+paises_unicos <- unique(datos_vip$from_country)
+carriles <- data.frame(
+  from_country = paises_unicos,
+  carril_x = 1:length(paises_unicos) # Del 1 al número total de países VIP
+)
+datos_vip <- datos_vip %>% left_join(carriles, by = "from_country")
+
+
+# ==============================================================================
+# 2. EL GRÁFICO ESTÁTICO (Estilo Burbujas Flotantes)
+# ==============================================================================
+grafico_vip <- ggplot(datos_vip, aes(x = carril_x, y = puntos_totales, color = from_country, group = from_country)) +
+  
+  # Dibujamos unas burbujas grandes
+  geom_point(size = 6, alpha = 0.9) +
+  
+  # Ponemos el nombre del país y los puntos dentro de la burbuja
+  geom_text(aes(label = from_country), vjust = -1.8, size = 2, fontface = "bold") +
+  geom_text(aes(label = puntos_totales), color = "white", size = 2, fontface = "bold") +
+  
+  scale_color_viridis_d(option = "turbo") +
+  
+  # Damos márgenes al Eje Y (de 0 a 24 puntos máximo posibles de un solo país)
+  scale_y_continuous(limits = c(5, 26)) +
+  
+  # theme_void borra los ejes, las cuadrículas y el fondo. Deja solo los datos.
+  theme_void() + 
+  labs(
+    title = "Países que nos dan +10 puntos",
+    subtitle = "Año: {closest_state}"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 9, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+    plot.subtitle = element_text(size = 7, color = "darkred", hjust = 0.5, margin = margin(b = 30)),
+    plot.margin = margin(30, 30, 30, 30)
+  )
+
+animacion_vip <- grafico_vip +
+  transition_states(year, transition_length = 2, state_length = 3) +
+  
+  # AHORA SÍ: Efectos combinados de entrada
+  # enter_grow hace que nazcan desde tamaño 0
+  # enter_fade hace que aparezcan de transparente a opaco
+  enter_grow() + enter_fade() +
+  
+  # Efectos combinados de salida
+  # exit_shrink hace que se encojan hasta desaparecer
+  # exit_fade hace que se desvanezcan
+  exit_shrink() + exit_fade() +
+  
+  # ease_aes('back-in-out') le da un efecto "elástico" (rebotan un poco al aparecer)
+  ease_aes('back-in-out')
+
+# Renderizar
+animate(animacion_vip, nframes = 300, fps = 15, width = 800, height = 500, units = "px", renderer = gifski_renderer())
+```
+
+
+
+### Función ```animate()```
+
+En realidad esta función se ejecuta internamente cada vez que realizamos una animacion con *gganimte*. El uso de este comando nos permite controlar los parametros que toma predefinidos. Los parámetros más importantes a tener en cuenta son :
+
+- nframes: indica el número total de fotogramas que tendrá la animación. A mayor numero, se verá más fluido, pero más tardará el ordenador en procesarlo.
+- fps: El numero de frames que quieres que tenga la animacion por segundo.
+- duration: le indicas cuanto quiere que dure tu animación.
+
+### Una aplicación original
+
+Se trata de un mapa de europa animado donde muestra la suma total de votos que ha recibido el país de origen(que va de color rosa) de los demás países que participaron en la final de eurovisión.
+Nuestra base de datos contiene los votos de los países que llegaron a la final de eurovión entre los años 1975 y 2022. En nuestro mapa animado se muestran los votos que recibió España de 2010 a 2022, pero el país de origen y el rango de años que queremos que se muestre en el gif puede modificarse facilmente.
+Los países que están de color gris no llegaron a la final ese año. Además, cuanto mayor sea el tono de azul, menores los votos que dió ese país.
+En el código se incluye la opción de que en cada país votante se muestre el número de votos que ha dado. Sin embargo, para que el gif saliese más limpio hemos tenido que quitar esa opción.
+
+```{r}
+#IMPORTANTE
+#para limpiar nombres de paises
+unique(votos_finales$to_country)
+
+#Primero filtramos el rango de años que queremos que se muestre en pantalla
+#Tener en cuenta que a mayor rango, mayor es el tiempo que tarda R en darte el gif (ya que trabaja muchos datos)
+
+year_finales <- votos_finales %>% 
+  filter(year %in% 2019:2022)
+#el simbolo %>% viene del paquete dplyr y sirve para encadenar operaciones. Esta forma es preferible para filtrar datos
+
+# -------------------------
+# MAPA DE EUROPA
+# -------------------------
+# 1. Filtrar Europa y EXCLUIR A RUSIA, ya que si no el mapa es muy grande y no se aprecia lo que queremos estudiar
+europa <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  filter(
+    subregion %in% c(
+      "Southern Europe",
+      "Western Europe",
+      "Northern Europe",
+      "Eastern Europe"
+    ),
+    name != "Russia"  
+  )
+# -------------------------
+# PARAMETROS
+# -------------------------
+
+pais_origen <- "Spain"
+years <- 2019:2022
+
+# -------------------------
+# DATOS DE VOTOS
+# -------------------------
+
+votos_pais <- year_finales %>%
+  filter(from_country == pais_origen) %>%
+  group_by(year, to_country) %>%
+  summarise(points = sum(points), .groups = "drop")
+
+#correccion de nombres de la base de datos
+votos_pais$to_country <- recode(
+  votos_pais$to_country,
+  "UK" = "United Kingdom",
+  "Czech Republic" = "Czechia",
+  "Turkey" = "Türkiye"
+)
+# -------------------------
+# EXPANDIR MAPA 
+# -------------------------
+
+# Crear un data.frame plano con las combinaciones
+# Esta parte es para que en el gif no nos aparezca en blanco los años anteriores a 2010 
+grid_combinaciones <- expand.grid(
+  year = years,
+  name = europa$name,
+  stringsAsFactors = FALSE
+)
+
+# Unir con la geometría
+mapa_animado <- grid_combinaciones %>%
+  left_join(europa, by = "name") %>%
+  st_as_sf()
+
+# Hacer el join con los votos
+mapa_animado <- mapa_animado %>%
+  left_join(
+    votos_pais,
+    by = c("year", "name" = "to_country")
+  )
+
+# Reemplazar NA por 0
+mapa_animado$points[is.na(mapa_animado$points)] <- 0
+# -------------------------
+# PROYECCIÓN 
+# -------------------------
+mapa_animado <- st_transform(mapa_animado, 3035)
+
+# Ajuste del BBOX 
+# Estas medidas van mejor para la proyección 3035 y sirve para ajustar el mapa y que europa se vea mejor
+bbox <- st_bbox(c(
+  xmin = 2500000, 
+  xmax = 6500000, 
+  ymin = 1200000, 
+  ymax = 4500000
+), crs = st_crs(mapa_animado))
+
+mapa_animado <- st_crop(mapa_animado, bbox)
+# Calculamos los centros para que los textos no se desplacen (los votos que dio el país)
+centros <- st_point_on_surface(mapa_animado)
+
+# -------------------------
+# GRAFICO ANIMADO
+# -------------------------
+animacion<-ggplot(mapa_animado) +
+  geom_sf(aes(fill = points), color = "white", linewidth = 0.2) +
+  scale_fill_distiller( palette = "Blues", na.value = "grey85") + #cambiar paleta para que quede mejor
+  
+  geom_sf(
+    data = mapa_animado %>% filter(name == pais_origen),
+    fill = "pink",
+    color = "white"
+  ) +
+   coord_sf(expand = FALSE) +
+  theme_void()+
+
+  labs(
+    title = paste("Puntos otorgados por", pais_origen),
+    subtitle = "Año: {closest_state}",
+    fill= "Puntos"
+  ) +
+
+  transition_states(
+    year,
+    transition_length = 1,
+    state_length = 4
+  ) +
+
+  ease_aes("linear")
+
+animacion
+```
+
+
+# Bibliografía
+
+
